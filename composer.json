@@ -1,0 +1,14 @@
+{
+    "name": "templates-uz/provisioner",
+    "description": "Standalone, minimal-dependency privileged helper for Templates.uz dynamic hosting. Not a Laravel app — deliberately kept small and auditable. See README.md.",
+    "type": "project",
+    "require": {
+        "php": ">=8.1",
+        "ext-pdo_mysql": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Provisioner\\": "src/"
+        }
+    }
+}
