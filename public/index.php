@@ -27,9 +27,11 @@ require __DIR__ . '/../src/Subdomain.php';
 require __DIR__ . '/../src/ProcessRunner.php';
 require __DIR__ . '/../src/DockerClient.php';
 require __DIR__ . '/../src/MysqlProvisioner.php';
+require __DIR__ . '/../src/NginxClient.php';
 
 use Provisioner\DockerClient;
 use Provisioner\MysqlProvisioner;
+use Provisioner\NginxClient;
 use Provisioner\ProvisioningException;
 use Provisioner\Subdomain;
 
@@ -125,6 +127,28 @@ try {
             phpVersion: optionalPhpVersion($body),
         );
 
+        // Nginx wiring is best-effort from this endpoint's point of view —
+        // the container is already up and usable even if the vhost step
+        // fails (e.g. Nginx automation isn't set up on this host yet), so a
+        // failure here is surfaced in the response, not thrown, and never
+        // rolls back the container itself.
+        $nginx = new NginxClient();
+        $result['domain']           = $nginx->domainFor($subdomain);
+        $result['nginx_configured'] = false;
+
+        $containerIp = $docker->containerIp($subdomain);
+
+        if ($containerIp === null) {
+            $result['nginx_error'] = 'Could not determine the container IP address.';
+        } else {
+            try {
+                $nginx->provision($subdomain, $containerIp);
+                $result['nginx_configured'] = true;
+            } catch (ProvisioningException $e) {
+                $result['nginx_error'] = $e->getMessage();
+            }
+        }
+
         respond(200, $result);
     }
 
@@ -141,6 +165,7 @@ try {
         $subdomain = Subdomain::parse($body['subdomain'] ?? null);
 
         $docker->destroy($subdomain);
+        (new NginxClient())->destroy($subdomain);
 
         if (! empty($body['db_name']) && ! empty($body['db_username'])) {
             (new MysqlProvisioner())->drop($body['db_name'], $body['db_username']);

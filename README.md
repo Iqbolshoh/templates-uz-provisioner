@@ -21,8 +21,12 @@ Read the whole file before deploying — this touches root-equivalent access
   destroy it out from under you.
 - `GET  /stats?subdomain=...` — CPU/RAM usage for a running container.
 
-It deliberately does **not** touch Nginx, domains, or SSL — you wire those up
-yourself per project (see "After provisioning" below).
+`/provision` and `/destroy` also wire up (and tear down) the subdomain's
+Nginx routing automatically — see "Nginx automation setup" below for the
+one-time setup this requires. If that setup hasn't been done yet, the
+container is still created successfully and `/provision`'s response reports
+`"nginx_configured": false` with an `"nginx_error"` explaining why, so a
+missing Nginx setup never blocks getting a working container.
 
 ## Server setup
 
@@ -143,21 +147,81 @@ curl http://127.0.0.1:9091/health
 # {"ok":true,"docker":true}
 ```
 
+## Nginx automation setup (one-time, per server)
+
+`/provision` and `/destroy` write per-subdomain Nginx vhost files and reload
+Nginx for you — but this needs a small amount of one-time, least-privilege
+setup so the Provisioner's own OS user (not root) can do that safely.
+
+### 1. A directory the Provisioner's OS user owns
+
+```bash
+sudo mkdir -p /etc/nginx/conf.d/templates-uz-dynamic
+sudo chown templates-uz-provisioner:templates-uz-provisioner /etc/nginx/conf.d/templates-uz-dynamic
+```
+
+This is the ONLY place this program ever writes Nginx config — never
+`/etc/nginx/conf.d` directly, never `sites-available`.
+
+### 2. Include it from your main Nginx config (once)
+
+Ubuntu's stock `nginx.conf` already includes `/etc/nginx/conf.d/*.conf` inside
+its `http {}` block, so the directory above is picked up automatically —
+confirm with `grep conf.d /etc/nginx/nginx.conf`. If your setup doesn't
+already do this, add manually inside the `http {}` block:
+
+```nginx
+include /etc/nginx/conf.d/templates-uz-dynamic/*.conf;
+```
+
+### 3. A narrow sudoers rule (only `nginx -t` and reload — nothing else)
+
+```bash
+echo 'templates-uz-provisioner ALL=(root) NOPASSWD: /usr/sbin/nginx -t, /bin/systemctl reload nginx' \
+  | sudo tee /etc/sudoers.d/templates-uz-provisioner
+sudo visudo -c   # always validate after editing sudoers
+```
+
+Adjust the `nginx`/`systemctl` paths if `which nginx` / `which systemctl`
+differ on your distro. If you'd rather not grant sudo at all (e.g. this
+process already runs as root in your setup, which is NOT recommended), set
+`PROVISIONER_NGINX_NO_SUDO=1` in `.env` instead.
+
+### 4. The wildcard cert already covers this
+
+No per-subdomain certbot call is needed — dynamic projects reuse the same
+`*.templates.uz` wildcard certificate NGINX.md sets up for static projects
+(`PROVISIONER_WILDCARD_CERT_DIR`, default
+`/etc/letsencrypt/live/templates.uz-wildcard`).
+
+### 5. Verify
+
+Provision a test dynamic project from Templates.uz's admin panel, then:
+
+```bash
+cat /etc/nginx/conf.d/templates-uz-dynamic/{subdomain}.conf
+curl -I https://{subdomain}.templates.uz
+```
+
+If `nginx_configured` came back `false` in the Provisioner's response, check
+`nginx_error` (shown on the project's edit page in Templates.uz) — almost
+always either step 1 or step 3 above wasn't done yet. Once fixed, use the
+"Retry provisioning" action on the project to re-run just the Nginx wiring
+(pass `provisionContainer: false` — see `ProjectController::reprovision` on
+the Templates.uz side, or just fix the underlying issue and hit `/provision`
+again; it's idempotent).
+
 ## After provisioning a dynamic project
 
-The Provisioner only gets you an empty, resource-limited environment. To go
-live:
-
 1. Deploy code into `/var/www/customers/{subdomain}/` (SSH/SFTP/git — however
-   you prefer; this program never touches it again after creating it).
-2. Point DNS/Nginx at the container. Simplest approach — add an Nginx
-   `location`/`server` block that proxies the subdomain to the container's
-   port on the `templates-uz-projects` Docker network
-   (`docker inspect templates-uz-project-{subdomain}` to find its IP), then
-   get a cert with `certbot --nginx -d {subdomain}.templates.uz`.
-3. If you provisioned a database (`/database` endpoint), plug the returned
+   you prefer; this program never touches it again after creating it). The
+   container serves whatever's there on port 80 (`php:{version}-apache`).
+2. If you provisioned a database (`/database` endpoint), plug the returned
    `db_host`/`db_name`/`db_username`/`db_password` into the app's own config
    — Templates.uz shows these on the project's edit page.
+
+Domain/Nginx routing itself is automatic now (see "Nginx automation setup"
+above) — nothing manual left here as long as that one-time setup is done.
 
 ## Security notes
 
@@ -171,5 +235,14 @@ live:
 - `MysqlProvisioner::drop()` refuses to drop anything outside the `proj_*`
   naming scheme it generates itself — defense in depth against a caller
   somehow passing an arbitrary database name.
+- `NginxClient` only ever writes inside `PROVISIONER_NGINX_CONF_DIR` (a
+  directory this program's own OS user owns) and only ever runs `nginx -t`
+  and the reload command via a sudoers rule scoped to exactly those two
+  commands — it cannot write or reload anything else on the host.
+- The Nginx rate-limit zone for dynamic projects is shared across every
+  project (keyed by subdomain, one fixed rate) — vanilla Nginx can't vary the
+  rate per key without Nginx Plus or OpenResty/Lua. Per-plan rate limits only
+  exist for *static* projects (enforced in Laravel, see the main app's
+  `AppServiceProvider::configureRateLimiting()`).
 - Keep this program's codebase small. If it grows past a few hundred lines,
   that's a sign functionality is creeping in that belongs elsewhere.
