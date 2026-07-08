@@ -155,7 +155,14 @@ final class DockerClient
 
     public function destroy(Subdomain $subdomain): void
     {
-        $this->destroyContainer($subdomain);
+        // Same host-wide lock as provision() — without it, a /destroy racing a
+        // concurrent /provision for the same subdomain could `docker rm -f` the
+        // container moments after doProvision()'s rename completes, silently
+        // removing what /provision just reported as successfully created.
+        $this->withBudgetLock(function () use ($subdomain) {
+            $this->destroyContainer($subdomain);
+        });
+
         $this->log('destroyed', $subdomain);
         // Deliberately NOT deleting $subdomain->linuxPath() — that's the
         // admin's deployed code. Removing a project's container should never

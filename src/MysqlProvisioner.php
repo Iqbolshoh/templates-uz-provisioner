@@ -62,6 +62,10 @@ final class MysqlProvisioner
             $this->pdo->exec("GRANT ALL PRIVILEGES ON `{$dbName}`.* TO '{$dbUser}'@'%'");
             $this->pdo->exec('FLUSH PRIVILEGES');
         } catch (\Throwable $e) {
+            // Also drop the user, not just the database — if CREATE USER succeeded
+            // but GRANT then threw, leaving this out orphans a permanent, privilege-
+            // less MySQL account on every such failure with no visible trace of it.
+            $this->pdo->exec("DROP USER IF EXISTS '{$dbUser}'@'%'");
             $this->pdo->exec("DROP DATABASE IF EXISTS `{$dbName}`");
 
             throw new ProvisioningException('MySQL provisioning failed: ' . $e->getMessage());

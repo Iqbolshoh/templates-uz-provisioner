@@ -148,6 +148,11 @@ final class NginxClient
 
     private function writeTestAndReload(string $path, string $conf, Subdomain $subdomain, string $action): void
     {
+        // Captured BEFORE the rename below overwrites it — needed to restore
+        // (not just delete) on rollback when this is a re-provision of an
+        // already-working vhost.
+        $previous = file_exists($path) ? @file_get_contents($path) : false;
+
         $tmpPath = $path . '.tmp-' . bin2hex(random_bytes(4));
 
         if (@file_put_contents($tmpPath, $conf) === false) {
@@ -163,9 +168,18 @@ final class NginxClient
         $test = ProcessRunner::run($this->sudoWrap(['nginx', '-t']));
 
         if ($test['exitCode'] !== 0) {
-            // Roll back — never leave a broken vhost in place that could
-            // down every other site this Nginx serves on the next reload.
-            @unlink($path);
+            // Roll back. On a first-time provision there's no previous file, so
+            // delete the broken one. On a RE-provision (plan/IP change against a
+            // subdomain that already had a working vhost), restore the prior
+            // content instead of unlinking — deleting here would leave Nginx
+            // running fine on its current in-memory config for now, but silently
+            // drop this subdomain's routing on the next UNRELATED reload (cert
+            // renewal, another project's provision) once it re-reads from disk.
+            if ($previous !== false) {
+                @file_put_contents($path, $previous);
+            } else {
+                @unlink($path);
+            }
             $this->log($action . '_failed', $subdomain, trim($test['stderr']));
 
             throw new ProvisioningException('Generated Nginx config is invalid, rolled back: ' . trim($test['stderr']));
