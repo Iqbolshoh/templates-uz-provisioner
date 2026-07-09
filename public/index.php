@@ -167,8 +167,13 @@ try {
         $docker->destroy($subdomain);
         (new NginxClient())->destroy($subdomain);
 
-        if (! empty($body['db_name']) && ! empty($body['db_username'])) {
-            (new MysqlProvisioner())->drop($body['db_name'], $body['db_username']);
+        // Which database/user (if any) to drop is looked up from this
+        // program's own registry, never taken from the request body — see
+        // MysqlProvisioner::drop(). "drop_database" only controls WHETHER to
+        // drop it, not WHICH one, so a caller can never point this at a
+        // different project's database.
+        if (! empty($body['drop_database'])) {
+            (new MysqlProvisioner())->drop($subdomain);
         }
 
         respond(200, ['ok' => true]);

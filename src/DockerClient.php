@@ -41,6 +41,13 @@ final class DockerClient
             throw new ProvisioningException('Docker is not available on this host.');
         }
 
+        // Deliberately OUTSIDE the budget lock below: a cold pull is a slow,
+        // purely network-bound operation with nothing to serialize against
+        // (it doesn't touch the budget or any container), so doing it before
+        // the lock lets unrelated concurrent /provision calls proceed
+        // instead of queuing behind someone else's image download.
+        $this->ensureImage($phpVersion ?: '8.3');
+
         // Budget check + container creation must run under a single host-wide
         // lock: PHP-FPM serves several /provision requests concurrently (see
         // README's pm.max_children), and without this, two requests could
@@ -151,6 +158,41 @@ final class DockerClient
             'container_id'   => $containerId,
             'container_name' => $finalName,
         ];
+    }
+
+    /**
+     * Makes sure `php:{version}-apache` is present locally BEFORE
+     * `doProvision()` runs `docker run`, and with its own generous timeout.
+     *
+     * `docker run` implicitly pulls a missing image too, but it does so
+     * under doProvision()'s 60s timeout — fine for "is the daemon hung",
+     * much too short for "downloading a few hundred MB of image layers on a
+     * cold cache", which routinely takes longer than that. Splitting the
+     * pull out means a slow-but-healthy pull no longer gets killed and
+     * reported as a broken `docker run`, while `docker run` itself keeps a
+     * short timeout that still means what it says.
+     *
+     * A no-op (fast `docker image inspect`, no network call) once the image
+     * is already local — i.e. for every provision after the first one for a
+     * given PHP version.
+     *
+     * @throws ProvisioningException
+     */
+    private function ensureImage(string $phpVersion): void
+    {
+        $image = 'php:' . $phpVersion . '-apache';
+
+        $inspect = ProcessRunner::run(['docker', 'image', 'inspect', $image], timeoutSeconds: 10);
+
+        if ($inspect['exitCode'] === 0) {
+            return;
+        }
+
+        $pull = ProcessRunner::run(['docker', 'pull', $image], timeoutSeconds: 300);
+
+        if ($pull['exitCode'] !== 0) {
+            throw new ProvisioningException("Could not pull Docker image {$image}: " . trim($pull['stderr']));
+        }
     }
 
     public function destroy(Subdomain $subdomain): void

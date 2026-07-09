@@ -49,7 +49,8 @@ final class NginxClient
             listen 443 ssl;
             server_name {$subdomain->value}.{$domain};
 
-            # Shared rate-limit zone keyed by subdomain (see {$zoneFile}).
+            # Shared rate-limit zone keyed by \$host (== this subdomain, since
+            # each vhost's server_name is unique — see {$zoneFile}).
             # NOTE: vanilla Nginx zones have one fixed rate for every key, so
             # this is the SAME limit for every dynamic project regardless of
             # plan — not per-plan tunable without Nginx Plus or OpenResty/Lua.
@@ -125,6 +126,13 @@ final class NginxClient
      * generated comment) — defaults to PROJECTS_RATE_PER_MINUTE's own
      * default (300) so it matches the static-project rate limit out of the
      * box; override with PROVISIONER_DYNAMIC_RATE_PER_MINUTE.
+     *
+     * Keyed by `$host`, a real built-in Nginx variable, rather than a
+     * hand-rolled `$subdomain` — Nginx only recognizes variables that are
+     * either built in or created via `map`/`set`/etc.; referencing an
+     * undeclared name here makes `nginx -t` fail with `unknown "..."
+     * variable` on every reload, which would break Nginx automation for
+     * every dynamic project, not just the one being (re)provisioned.
      */
     private function ensureZoneFile(): void
     {
@@ -138,7 +146,7 @@ final class NginxClient
         $written = @file_put_contents(
             $path,
             "# Managed by templates-uz-provisioner — shared rate-limit zone for every dynamic project.\n" .
-            "limit_req_zone \$subdomain zone=dynamic_projects:10m rate={$ratePerMinute}r/m;\n",
+            "limit_req_zone \$host zone=dynamic_projects:10m rate={$ratePerMinute}r/m;\n",
         );
 
         if ($written === false) {

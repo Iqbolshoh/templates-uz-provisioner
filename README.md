@@ -15,10 +15,11 @@ Read the whole file before deploying — this touches root-equivalent access
   resource-limited Docker container (`--cpus`, `--memory`, `--pids-limit`)
   bind-mounted to it, read-write. Does **not** deploy any code.
 - `POST /database`  — creates an isolated MySQL database + user + random password.
-- `POST /destroy`   — removes the container (and DB, if `db_name`/`db_username`
-  are given). **Never** deletes `/var/www/customers/{subdomain}/` — that's
-  code you deployed by hand, so a project deletion in Templates.uz can't
-  destroy it out from under you.
+- `POST /destroy`   — removes the container (and the subdomain's database, if
+  `drop_database: true` is given — see "Database records" below). **Never**
+  deletes `/var/www/customers/{subdomain}/` — that's code you deployed by
+  hand, so a project deletion in Templates.uz can't destroy it out from under
+  you.
 - `GET  /stats?subdomain=...` — CPU/RAM usage for a running container.
 
 `/provision` and `/destroy` also wire up (and tear down) the subdomain's
@@ -223,6 +224,19 @@ again; it's idempotent).
 Domain/Nginx routing itself is automatic now (see "Nginx automation setup"
 above) — nothing manual left here as long as that one-time setup is done.
 
+## Database records
+
+`/database` records which database/user it created for a subdomain in a
+small local registry — one JSON file per subdomain under
+`PROVISIONER_DB_REGISTRY_DIR` (defaults next to the budget lock file; see
+`.env.example`). `/destroy` with `"drop_database": true` drops *whatever
+this registry says belongs to that subdomain* — the request body's
+`drop_database` flag only controls **whether** to drop a database, never
+**which** one, so a caller can't name an arbitrary database to drop. Back
+this directory up (or accept that a lost registry just means a future
+`/destroy` won't auto-clean the database — the container and Nginx cleanup
+are unaffected either way).
+
 ## Security notes
 
 - Every subdomain is validated (`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -232,15 +246,17 @@ above) — nothing manual left here as long as that one-time setup is done.
 - All shell commands run via `proc_open()` with an **argument array**, never
   a concatenated string — PHP does not invoke a shell for array commands, so
   there's no shell-injection surface regardless of input.
-- `MysqlProvisioner::drop()` refuses to drop anything outside the `proj_*`
-  naming scheme it generates itself — defense in depth against a caller
-  somehow passing an arbitrary database name.
+- `MysqlProvisioner::drop()` never takes a database/user name from the
+  caller at all — it only accepts a subdomain and looks up what (if
+  anything) it recorded for that subdomain in its own registry (see
+  "Database records" above), so a caller can never name an arbitrary
+  database, including another project's `proj_*` database, to drop.
 - `NginxClient` only ever writes inside `PROVISIONER_NGINX_CONF_DIR` (a
   directory this program's own OS user owns) and only ever runs `nginx -t`
   and the reload command via a sudoers rule scoped to exactly those two
   commands — it cannot write or reload anything else on the host.
 - The Nginx rate-limit zone for dynamic projects is shared across every
-  project (keyed by subdomain, one fixed rate) — vanilla Nginx can't vary the
+  project (keyed by `$host`, one fixed rate) — vanilla Nginx can't vary the
   rate per key without Nginx Plus or OpenResty/Lua. Per-plan rate limits only
   exist for *static* projects (enforced in Laravel, see the main app's
   `AppServiceProvider::configureRateLimiting()`).
